@@ -20,6 +20,8 @@ defmodule Kokoro do
     }
   end
 
+  # TODO: Split text by punctuation and generate audio for each chunk?
+  # There is also a max length for the tokens
   def create_audio(kokoro, text, voice, speed \\ 1.0) do
     # Validate inputs
     unless Map.has_key?(kokoro.voices, voice) do
@@ -31,16 +33,15 @@ defmodule Kokoro do
     end
 
     tokens =
-      Kokoro.Phonemizer.phonemize(text)
+      Kokoro.Phonemizer.phonemize(text) |> dbg()
       |> Kokoro.Tokenizer.tokenize()
 
     # Prepare inputs for model
-    # Create tensors directly
+    # 0-pad the tokens
     tokens_tensor = Nx.tensor([[0 | tokens ++ [0]]], type: :s64)
 
     # Take just the first row of style data to get [1, 256] shape
-    style_data = Map.get(kokoro.voices, "af_sarah")
-
+    style_data = Map.get(kokoro.voices, voice)
     style =
       style_data
       # Take first row
@@ -55,7 +56,6 @@ defmodule Kokoro do
 
     {audio} = Ortex.run(kokoro.session, {tokens_tensor, style, speed_tensor})
 
-    # SAMPLE_RATE
     {audio, 24000}
   end
 
