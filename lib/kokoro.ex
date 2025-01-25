@@ -3,6 +3,8 @@ defmodule Kokoro do
 
   defstruct [:session, :voices]
 
+  @max_phoneme_length 510  # Matching Python's MAX_PHONEME_LENGTH
+
   def new(model_path, voices_path) do
     # Load the ONNX model
     session = Ortex.load(model_path)
@@ -32,31 +34,70 @@ defmodule Kokoro do
       raise "Speed should be between 0.5 and 2.0"
     end
 
-    tokens =
-      Kokoro.Phonemizer.phonemize(text) |> dbg()
-      |> Kokoro.Tokenizer.tokenize()
+    normalized_text = normalize_text(text)
 
-    # Prepare inputs for model
-    # 0-pad the tokens
-    tokens_tensor = Nx.tensor([[0 | tokens ++ [0]]], type: :s64)
+    # Get phonemes and split into batches
+    phonemes = Kokoro.Phonemizer.phonemize(normalized_text) |> dbg()
+    phoneme_batches = split_phonemes(phonemes) |> dbg()
 
-    # Take just the first row of style data to get [1, 256] shape
-    style_data = Map.get(kokoro.voices, voice)
-    style =
-      style_data
-      # Take first row
-      |> List.first()
-      # Take first inner array
-      |> List.first()
-      |> Nx.tensor(type: :f32)
-      # Ensure shape is [1, 256]
-      |> Nx.reshape({1, 256})
+    # Process each batch and concatenate results
+    audio_tensors =
+      Enum.map(phoneme_batches, fn batch_phonemes ->
+        tokens =
+          batch_phonemes
+          |> Kokoro.Tokenizer.tokenize()
 
-    speed_tensor = Nx.tensor([speed], type: :f32)
+        # Prepare inputs for model
+        tokens_tensor = Nx.tensor([[0 | tokens ++ [0]]], type: :s64)
+        style_data = Map.get(kokoro.voices, voice)
+        style =
+          style_data
+          |> List.first()
+          |> List.first()
+          |> Nx.tensor(type: :f32)
+          |> Nx.reshape({1, 256})
 
-    {audio} = Ortex.run(kokoro.session, {tokens_tensor, style, speed_tensor})
+        speed_tensor = Nx.tensor([speed], type: :f32)
 
-    {audio, 24000}
+        {audio} = Ortex.run(kokoro.session, {tokens_tensor, style, speed_tensor})
+        audio
+      end)
+
+    # Combine all audio tensors
+    combined_audio = Nx.concatenate(audio_tensors)
+    {combined_audio, 24000}
+  end
+
+  defp split_phonemes(phonemes) do
+    # Split by punctuation marks while keeping them
+    phonemes
+    # FIXME: phoneize doesn't preserve punctuation
+    |> String.split(~r/([.,!?;])/, include_captures: true, trim: true)
+    |> dbg()
+    |> Enum.chunk_while(
+      "",
+      fn part, acc ->
+        part = String.trim(part)
+        new_length = String.length(acc) + String.length(part) + 1
+
+        cond do
+          part == "" ->
+            {:cont, acc}
+          new_length > @max_phoneme_length and acc != "" ->
+            {:cont, String.trim(acc), part}
+          String.match?(part, ~r/^[.,!?;]$/) ->
+            {:cont, acc <> part}
+          acc == "" ->
+            {:cont, part}
+          true ->
+            {:cont, acc <> " " <> part}
+        end
+      end,
+      fn
+        "" -> {:cont, []}
+        acc -> {:cont, String.trim(acc), []}
+      end
+    )
   end
 
   def save_audio_to_file(kokoro, text, voice, speed, dest_path) do
@@ -74,4 +115,43 @@ defmodule Kokoro do
   def get_voices(%__MODULE__{voices: voices}) do
     Map.keys(voices)
   end
+
+  defp normalize_text(text) do
+    text
+    |> String.replace(["\u2018", "\u2019"], "'") # Replace smart quotes
+    |> String.replace("«", "\u2020")
+    |> String.replace("»", "\u2021")
+    |> String.replace(["\u2020", "\u2021"], "\"")
+    |> String.replace("(", "«")
+    |> String.replace(")", "»")
+    # Replace Chinese/Japanese punctuation with English equivalents
+    |> replace_cjk_punctuation()
+    |> String.replace(~r/[^\S \n]/, " ") # Replace non-space whitespace with space
+    |> String.replace(~r/  +/, " ") # Collapse multiple spaces
+    |> String.replace(~r/(?<=\n) +(?=\n)/, "") # Remove spaces between newlines
+    |> normalize_titles()
+    # |> normalize_numbers()
+    |> String.trim()
+  end
+
+  defp replace_cjk_punctuation(text) do
+    replacements = [
+      {"、", "., "}, {"。", ". "}, {"！", "! "},
+      {"，", ", "}, {"：", ": "}, {"；", "; "},
+      {"？", "? "}
+    ]
+    Enum.reduce(replacements, text, fn {from, to}, acc ->
+      String.replace(acc, from, to)
+    end)
+  end
+
+  defp normalize_titles(text) do
+    text
+    |> String.replace(~r/\bD[Rr]\.(?= [A-Z])/, "Doctor")
+    |> String.replace(~r/\b(?:Mr\.|MR\.(?= [A-Z]))/, "Mister")
+    |> String.replace(~r/\b(?:Ms\.|MS\.(?= [A-Z]))/, "Miss")
+    |> String.replace(~r/\b(?:Mrs\.|MRS\.(?= [A-Z]))/, "Mrs")
+    |> String.replace(~r/\betc\.(?! [A-Z])/, "etc")
+  end
+
 end
