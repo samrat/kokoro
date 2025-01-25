@@ -73,8 +73,6 @@ defmodule Kokoro.Phonemizer do
   end
 
   def restore_punctuation(phonemes, punct_map) do
-    dbg(phonemes)
-    dbg(punct_map)
     parts = String.split(phonemes, " ", trim: true)
 
     parts
@@ -88,5 +86,3 @@ defmodule Kokoro.Phonemizer do
     |> Enum.join(" ")
   end
 end
-
-Kokoro.Phonemizer.phonemize("Hello world")

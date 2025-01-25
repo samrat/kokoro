@@ -5,21 +5,46 @@ defmodule Kokoro do
 
   @max_phoneme_length 510  # Matching Python's MAX_PHONEME_LENGTH
 
-  def new(model_path, voices_path) do
+  def new(model_path, voices_dir) do
     # Load the ONNX model
     session = Ortex.load(model_path)
 
-    # Load voices from JSON file
+    # Load voices from .bin files in the voices directory
     voices =
-      voices_path
-      |> File.read!()
-      |> Jason.decode!()
+      voices_dir
+      |> File.ls!()
+      |> Enum.filter(&String.ends_with?(&1, ".bin"))
+      |> Map.new(fn filename ->
+        voice_name = Path.basename(filename, ".bin")
+        voice_path = Path.join(voices_dir, filename)
+        voice_data = load_voice_binary(voice_path)
+        {voice_name, voice_data}
+      end)
 
     # Create Kokoro instance
     %__MODULE__{
       session: session,
       voices: voices
     }
+  end
+
+  defp load_voice_binary(path) do
+    data =
+      path
+      |> File.read!()
+      |> then(fn binary ->
+        binary
+        |> :binary.bin_to_list()
+        |> Enum.chunk_every(4)
+        |> Enum.map(fn bytes ->
+          <<float::float-32-little>> = :erlang.list_to_binary(bytes)
+          float
+        end)
+      end)
+      |> Enum.chunk_every(256)
+      |> Enum.map(&List.wrap/1)
+
+    [data]
   end
 
   # TODO: Split text by punctuation and generate audio for each chunk?
@@ -37,8 +62,8 @@ defmodule Kokoro do
     normalized_text = normalize_text(text)
 
     # Get phonemes and split into batches
-    phonemes = Kokoro.Phonemizer.phonemize(normalized_text) |> dbg()
-    phoneme_batches = split_phonemes(phonemes) |> dbg()
+    phonemes = Kokoro.Phonemizer.phonemize(normalized_text)
+    phoneme_batches = split_phonemes(phonemes)
 
     # Process each batch and concatenate results
     audio_tensors =
@@ -71,9 +96,7 @@ defmodule Kokoro do
   defp split_phonemes(phonemes) do
     # Split by punctuation marks while keeping them
     phonemes
-    # FIXME: phoneize doesn't preserve punctuation
     |> String.split(~r/([.,!?;])/, include_captures: true, trim: true)
-    |> dbg()
     |> Enum.chunk_while(
       "",
       fn part, acc ->
