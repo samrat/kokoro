@@ -107,11 +107,31 @@ defmodule Kokoro do
           part == "" ->
             {:cont, acc}
           new_length > @max_phoneme_length and acc != "" ->
-            {:cont, String.trim(acc), part}
+            if String.length(part) > @max_phoneme_length do
+              # If the part itself is too long, split it into chunks of max_length
+              chunks = part
+                |> String.graphemes()
+                |> Enum.chunk_every(@max_phoneme_length)
+                |> Enum.map(&Enum.join/1)
+
+              # Output the accumulated string first
+              {:cont, String.trim(acc), List.first(chunks)}
+            else
+              {:cont, String.trim(acc), part}
+            end
           String.match?(part, ~r/^[.,!?;]$/) ->
             {:cont, acc <> part}
           acc == "" ->
-            {:cont, part}
+            if String.length(part) > @max_phoneme_length do
+              # Split long initial part into chunks
+              [first | rest] = part
+                |> String.graphemes()
+                |> Enum.chunk_every(@max_phoneme_length)
+                |> Enum.map(&Enum.join/1)
+              {:cont, first, List.first(rest) || ""}
+            else
+              {:cont, part}
+            end
           true ->
             {:cont, acc <> " " <> part}
         end
@@ -124,15 +144,17 @@ defmodule Kokoro do
   end
 
   def save_audio_to_file(kokoro, text, voice, speed, dest_path) do
+    audio_binary = create_audio_binary(kokoro, text, voice, speed)
+    File.write!(dest_path, audio_binary)
+  end
+
+  def create_audio_binary(kokoro, text, voice, speed) do
     {audio_tensor, _sample_rate} = create_audio(kokoro, text, voice, speed)
 
-    audio_binary =
-      audio_tensor
-      |> Nx.to_flat_list()
-      |> Enum.map(fn x -> <<x::float-32-little>> end)
-      |> Enum.join()
-
-    File.write!(dest_path, audio_binary)
+    audio_tensor
+    |> Nx.to_flat_list()
+    |> Enum.map(fn x -> <<x::float-32-little>> end)
+    |> Enum.join()
   end
 
   def get_voices(%__MODULE__{voices: voices}) do
