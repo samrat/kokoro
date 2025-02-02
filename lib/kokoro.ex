@@ -3,7 +3,13 @@ defmodule Kokoro do
 
   defstruct [:session, :voices]
 
-  @max_phoneme_length 510  # Matching Python's MAX_PHONEME_LENGTH
+  # Matching Python's MAX_PHONEME_LENGTH
+  @max_phoneme_length 510
+
+  # wave file format
+  @n_channels 1
+  @sampwidth 2
+  @frame_rate 24_000
 
   def new(model_path, voices_dir) do
     # Load the ONNX model
@@ -75,6 +81,7 @@ defmodule Kokoro do
         # Prepare inputs for model
         tokens_tensor = Nx.tensor([[0 | tokens ++ [0]]], type: :s64)
         style_data = Map.get(kokoro.voices, voice)
+
         style =
           style_data
           |> List.first()
@@ -106,10 +113,12 @@ defmodule Kokoro do
         cond do
           part == "" ->
             {:cont, acc}
+
           new_length > @max_phoneme_length and acc != "" ->
             if String.length(part) > @max_phoneme_length do
               # If the part itself is too long, split it into chunks of max_length
-              chunks = part
+              chunks =
+                part
                 |> String.graphemes()
                 |> Enum.chunk_every(@max_phoneme_length)
                 |> Enum.map(&Enum.join/1)
@@ -119,19 +128,24 @@ defmodule Kokoro do
             else
               {:cont, String.trim(acc), part}
             end
+
           String.match?(part, ~r/^[.,!?;]$/) ->
             {:cont, acc <> part}
+
           acc == "" ->
             if String.length(part) > @max_phoneme_length do
               # Split long initial part into chunks
-              [first | rest] = part
+              [first | rest] =
+                part
                 |> String.graphemes()
                 |> Enum.chunk_every(@max_phoneme_length)
                 |> Enum.map(&Enum.join/1)
+
               {:cont, first, List.first(rest) || ""}
             else
               {:cont, part}
             end
+
           true ->
             {:cont, acc <> " " <> part}
         end
@@ -152,18 +166,60 @@ defmodule Kokoro do
     {audio_tensor, _sample_rate} = create_audio(kokoro, text, voice, speed)
 
     audio_tensor
-    |> Nx.to_flat_list()
-    |> Enum.map(fn x -> <<x::float-32-little>> end)
-    |> Enum.join()
+    |> Nx.to_binary()
   end
 
   def get_voices(%__MODULE__{voices: voices}) do
     Map.keys(voices)
   end
 
+  defp normalize_audio_data(tensor) do
+    """
+    https://github.com/ipython/ipython/blob/5949cc367e5c095a51bf74dbbb7c459617f1d6d7/IPython/lib/display.py#L169
+    """
+
+    max_abs_value = tensor |> Nx.abs() |> Nx.reduce_max()
+
+    tensor
+    |> Nx.divide(max_abs_value)
+    |> Nx.dot(32767)
+    |> Nx.round()
+    |> Nx.as_type(:u16)
+    |> Nx.to_binary()
+  end
+
+  def create_wave(tensor) do
+    audio_binary = tensor |> Nx.backend_transfer() |> normalize_audio_data()
+    audio_size = byte_size(audio_binary)
+
+    # https://www.mmsp.ece.mcgill.ca/Documents/AudioFormats/WAVE/WAVE.html
+    <<
+      # wave file format
+      "RIFF",
+      36 + audio_size::32-little,
+      "WAVE",
+
+      # fmt chunk
+      "fmt ",
+      16::32-little,
+      1::16-little,
+      @n_channels::16-little,
+      @frame_rate::32-little,
+      @n_channels * @sampwidth * @frame_rate::32-little,
+      @n_channels * @sampwidth::16-little,
+      @sampwidth * 8::16-little,
+
+      # data chunk
+      "data",
+      audio_size::32-little,
+      audio_binary::binary
+    >>
+  end
+
   defp normalize_text(text) do
     text
-    |> String.replace(["\u2018", "\u2019"], "'") # Replace smart quotes
+    # Replace smart quotes
+    |> String.replace(["\u2018", "\u2019"], "'")
     |> String.replace("«", "\u2020")
     |> String.replace("»", "\u2021")
     |> String.replace(["\u2020", "\u2021"], "\"")
@@ -171,9 +227,12 @@ defmodule Kokoro do
     |> String.replace(")", "»")
     # Replace Chinese/Japanese punctuation with English equivalents
     |> replace_cjk_punctuation()
-    |> String.replace(~r/[^\S \n]/, " ") # Replace non-space whitespace with space
-    |> String.replace(~r/  +/, " ") # Collapse multiple spaces
-    |> String.replace(~r/(?<=\n) +(?=\n)/, "") # Remove spaces between newlines
+    # Replace non-space whitespace with space
+    |> String.replace(~r/[^\S \n]/, " ")
+    # Collapse multiple spaces
+    |> String.replace(~r/  +/, " ")
+    # Remove spaces between newlines
+    |> String.replace(~r/(?<=\n) +(?=\n)/, "")
     |> normalize_titles()
     # |> normalize_numbers()
     |> String.trim()
@@ -181,10 +240,15 @@ defmodule Kokoro do
 
   defp replace_cjk_punctuation(text) do
     replacements = [
-      {"、", "., "}, {"。", ". "}, {"！", "! "},
-      {"，", ", "}, {"：", ": "}, {"；", "; "},
+      {"、", "., "},
+      {"。", ". "},
+      {"！", "! "},
+      {"，", ", "},
+      {"：", ": "},
+      {"；", "; "},
       {"？", "? "}
     ]
+
     Enum.reduce(replacements, text, fn {from, to}, acc ->
       String.replace(acc, from, to)
     end)
@@ -198,5 +262,4 @@ defmodule Kokoro do
     |> String.replace(~r/\b(?:Mrs\.|MRS\.(?= [A-Z]))/, "Mrs")
     |> String.replace(~r/\betc\.(?! [A-Z])/, "etc")
   end
-
 end
