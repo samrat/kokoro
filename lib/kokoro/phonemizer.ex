@@ -42,7 +42,7 @@ defmodule Kokoro.Phonemizer do
   end
 
   defp find_espeak do
-    System.find_executable("/opt/homebrew/bin/espeak") ||
+    System.find_executable("espeak") ||
       raise "espeak not found in PATH. Please install espeak-ng"
   end
 
