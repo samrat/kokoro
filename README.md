@@ -2,6 +2,10 @@
 
 Elixir bindings to the [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) text-to-speech model
 
+## Try the Livebook
+
+The easiest way to try the library is to [run the livebook here](/kokoro_player.livemd).
+
 ## Usage
 - Add this library as a mix dependency:
 
