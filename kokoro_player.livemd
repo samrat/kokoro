@@ -1,0 +1,141 @@
+# Kokoro Text-to-speech example
+
+```elixir
+Mix.install([
+  {:kino, "~> 0.14.2"},
+  {:membrane_core, "~> 1.1"},
+  {:kokoro, path: "/Users/samrat/code/kokoro_tts"},
+  {:membrane_raw_audio_parser_plugin, "~> 0.4.0"},
+  {:membrane_portaudio_plugin, "~> 0.19.2"},
+  {:membrane_text_format, github: "kim-company/membrane_text_format"}
+])
+```
+
+## Section
+
+Evaluate all cells and scroll to the bottom. There is a text input which will convert the text to speech.
+
+```elixir
+defmodule KokoroFilter do
+  use Membrane.Filter
+
+  def_input_pad(:input, accepted_format: _any)
+  def_output_pad(:output, accepted_format: _any)
+
+  def_options model_path: [
+                spec: String.t(),
+                description: "Path to the ONNX model file"
+              ],
+              voices_dir: [
+                spec: String.t(),
+                description: "Path to the voices directory"
+              ]
+
+  @impl true
+  def handle_init(_ctx, opts) do
+    {[],
+     %{
+       kokoro: Kokoro.new(opts.model_path, opts.voices_dir)
+     }}
+  end
+
+  def handle_stream_format(_pad, _stream_format, _ctx, state) do
+    {[
+       stream_format:
+         {:output, %Membrane.RawAudio{channels: 1, sample_rate: 24_000, sample_format: :f32le}}
+     ], state}
+  end
+
+  @impl true
+  def handle_buffer(:input, buffer, _ctx, state) do
+    audio = Kokoro.create_audio_binary(state.kokoro, buffer.payload, "af_nicole", 1.0)
+    {[buffer: {:output, %Membrane.Buffer{payload: audio}}], state}
+  end
+
+  @impl true
+  def handle_info({_port, {:exit_status, 0}}, _ctx, state) do
+    IO.inspect("FIXME: Handle this elsewhere?(Port exited)")
+    {[], state}
+  end
+end
+```
+
+```elixir
+defmodule KinoSource do
+  use Membrane.Source
+
+  def_output_pad(:output, accepted_format: _any, flow_control: :push)
+
+  def handle_init(_ctx, _opts) do
+    {[], %{}}
+  end
+
+  def handle_playing(_ctx, state) do
+    {[stream_format: {:output, %Membrane.Text{encoding: :utf8}}], state}
+  end
+
+  def handle_parent_notification(notification, _ctx, state) do
+    dbg(notification)
+    {[buffer: {:output, %Membrane.Buffer{payload: notification}}], state}
+  end
+end
+```
+
+```elixir
+defmodule AudioPlayerPipeline do
+  use Membrane.Pipeline
+
+  @impl true
+  def handle_init(_ctx, opts) do
+    structure = [
+      child(:source, KinoSource)
+      |> child(:kokoro, %KokoroFilter{
+        model_path: opts[:model_path],
+        voices_dir: opts[:voices_dir]
+      })
+      |> child(:sink, Membrane.PortAudio.Sink)
+    ]
+
+    {[spec: structure], %{}}
+  end
+
+  @impl true
+  def handle_info({:kino_input, text}, _ctx, state) do
+    dbg(text)
+    {[notify_child: {:source, text}], state}
+  end
+end
+```
+
+```elixir
+model_path = nil
+voices_dir = nil
+
+if !(model_path && voices_dir) do
+  raise "model_path and voices_dir not set"
+end
+{:ok, _supervisor, pipeline} =
+  Membrane.Pipeline.start_link(AudioPlayerPipeline,
+   model_path: model_path,
+   voices_dir: voices_dir
+  )
+
+```
+
+```elixir
+form =
+  Kino.Control.form(
+    [
+      name: Kino.Input.text("Name")
+    ],
+    submit: "Submit"
+  )
+
+Kino.listen(form, fn event ->
+  IO.inspect(event)
+  %{data: %{name: text}} = event
+  send(pipeline, {:kino_input, text})
+end)
+
+form
+```
