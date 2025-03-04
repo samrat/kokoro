@@ -88,9 +88,7 @@ defmodule Kokoro do
         audio
       end)
 
-    # Combine all audio tensors
-    combined_audio = Nx.concatenate(audio_tensors)
-    {combined_audio, 24000}
+    {audio_tensors, 24000}
   end
 
   defp split_phonemes(phonemes) do
@@ -149,11 +147,14 @@ defmodule Kokoro do
   end
 
   def create_audio_binary(kokoro, text, voice, speed) do
-    {audio_tensor, _sample_rate} = create_audio(kokoro, text, voice, speed)
+    {audio_tensors, _sample_rate} = create_audio(kokoro, text, voice, speed)
 
-    audio_tensor
-    |> Nx.to_flat_list()
-    |> Enum.map(fn x -> <<x::float-32-little>> end)
+    audio_tensors
+    |> Enum.flat_map(fn tensor ->
+      tensor
+      |> Nx.to_flat_list()
+      |> Enum.map(fn x -> <<x::float-32-little>> end)
+    end)
     |> Enum.join()
   end
 
